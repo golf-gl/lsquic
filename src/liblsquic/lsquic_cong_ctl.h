@@ -66,6 +66,12 @@ struct cong_ctl_if
 
     void
     (*cci_cleanup) (void *cong_ctl);
+
+    void
+    (*cci_launch_cwnd_loan) (void *cong_ctl, unsigned in_flight);
+
+    int
+    (*cci_get_cwnd_loan_status) (void *cong_ctl);
 };
 
 #endif

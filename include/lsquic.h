@@ -452,6 +452,15 @@ typedef struct ssl_ctx_st * (*lsquic_lookup_cert_f)(
 /** Transport parameter sanity checks are performed by default. */
 #define LSQUIC_DF_CHECK_TP_SANITY 1
 
+/* By default, enable CWnd loan */
+#define LSQUIC_DF_ENABLE_CWND_LOAN 1
+
+/* By default, loan 1x inflight of cwnd */
+#define LSQUIC_DF_CWND_LOAN_CWND_GAIN 1
+
+/* By default, set the loan pacing gain to 1 */
+#define LSQUIC_DF_CWND_LOAN_PACING_GAIN 1
+
 struct lsquic_engine_settings {
     /**
      * This is a bit mask wherein each bit corresponds to a value in
@@ -1092,6 +1101,27 @@ struct lsquic_engine_settings {
      * Default value is @ref LSQUIC_DF_CHECK_TP_SANITY
      */
     int             es_check_tp_sanity;
+
+    /**
+     * Enable CWnd loan.  Allowed values are 0 and 1.
+     *
+     * Default value is @ref LSQUIC_DF_ENABLE_CWND_LOAN
+     */
+    unsigned        es_enable_cwnd_loan;
+
+    /**
+     * The amount of CWnd we loan base on inflight.
+     *
+     * Default value is @ref LSQUIC_DF_CWND_LOAN_CWND_GAIN
+     */
+    float           es_cwnd_loan_cwnd_gain;
+
+    /**
+     * The pacing gain during loan transmission.
+     *
+     * Default value is @ref LSQUIC_DF_CWND_LOAN_PACING_GAIN
+     */
+    float           es_cwnd_loan_pacing_gain;
 };
 
 /* Initialize `settings' to default values */

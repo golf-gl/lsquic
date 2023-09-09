@@ -260,6 +260,13 @@ lsquic_bbr_pacing_rate (void *cong_ctl, int in_recovery)
         bw = BW_TIMES(&bw, bbr->bbr_high_cwnd_gain);
     }
 
+    if (bbr->bbr_loan.mode == BBR_IN_LOAN)
+    {
+        // In default CWnd_Loan mode, we limit the pacing rate to half of the BW
+        // So 1*BDP amount of borrowed cwnd needs 2*RTT for transmission
+        return bbr->bbr_loan.loan_pacing_rate;
+    }
+
     return BW_TO_BYTES_PER_SEC(&bw);
 }
 
@@ -359,6 +366,7 @@ lsquic_bbr_sent (void *cong_ctl, struct lsquic_packet_out *packet_out,
                                         uint64_t in_flight, int app_limited)
 {
     struct lsquic_bbr *const bbr = cong_ctl;
+    lsquic_time_t now = lsquic_time_now();
 
     if (!(packet_out->po_flags & PO_MINI))
         lsquic_bw_sampler_packet_sent(&bbr->bbr_bw_sampler, packet_out,
@@ -371,6 +379,22 @@ lsquic_bbr_sent (void *cong_ctl, struct lsquic_packet_out *packet_out,
 
     if (app_limited)
         bbr_app_limited(bbr, in_flight);
+
+    if (bbr->bbr_loan.mode == BBR_IN_LOAN)
+    {
+        bbr->bbr_loan.accu_pkt_sent += 1;
+        bbr->bbr_loan.pkt_sent += 1;
+        LSQ_DEBUG("Sending a loan pkt at %"PRIu64", ts_diff:%"PRIu64
+            ", ts_diff_accu:%"PRIu64", loan_pacing_rate:%"PRIu64
+            ", pkt_sent:%"PRIu64,
+            now,
+            now - bbr->bbr_loan.last_sent_ts,
+            now - bbr->bbr_loan.launch_time,
+            bbr->bbr_loan.loan_pacing_rate,
+            bbr->bbr_loan.pkt_sent
+            );
+        bbr->bbr_loan.last_sent_ts = now;
+    }
 }
 
 
@@ -774,6 +798,11 @@ lsquic_bbr_get_cwnd (void *cong_ctl)
     else
         cwnd = bbr->bbr_cwnd;
 
+    if (bbr->bbr_loan.mode == BBR_IN_LOAN)
+    {
+        return bbr->bbr_loan.base_cwnd + bbr->bbr_loan.borrowed_cwnd;
+    }
+
     return cwnd;
 }
 
@@ -994,6 +1023,7 @@ lsquic_bbr_end_ack (void *cong_ctl, uint64_t in_flight)
     struct lsquic_bbr *const bbr = cong_ctl;
     int is_round_start, min_rtt_expired;
     uint64_t bytes_acked, excess_acked, bytes_lost;
+    uint64_t cwnd_loan_overall_rate;
 
     assert(bbr->bbr_flags & BBR_FLAG_IN_ACK);
     bbr->bbr_flags &= ~BBR_FLAG_IN_ACK;
@@ -1046,6 +1076,32 @@ lsquic_bbr_end_ack (void *cong_ctl, uint64_t in_flight)
     calculate_cwnd(bbr, bytes_acked, excess_acked);
     calculate_recovery_window(bbr, bytes_acked, bytes_lost, in_flight);
 
+    if (bbr->bbr_loan.mode == BBR_IN_LOAN) {
+
+        bbr->bbr_loan.mode = BBR_NOT_IN_LOAN;
+
+        if (bbr->bbr_loan.last_sent_ts > bbr->bbr_loan.launch_time)
+        {
+            // in Byte/s
+            cwnd_loan_overall_rate = bbr->bbr_loan.pkt_sent * kDefaultTCPMSS * 1000000 / 
+                (bbr->bbr_loan.last_sent_ts - bbr->bbr_loan.launch_time);
+        }
+        else
+        {
+            cwnd_loan_overall_rate = 0;
+        }
+
+        LSQ_DEBUG("End of CWnd loan at %"PRIu64", CWnd:%"PRIu64", inflight:%"PRIu64
+            ", pkt sent:%"PRIu64", accu pkt_sent:%"PRIu64", overall_rate:%"PRIu64,
+            lsquic_time_now(),
+            get_target_cwnd(bbr, bbr->bbr_pacing_gain),
+            in_flight, 
+            bbr->bbr_loan.pkt_sent,
+            bbr->bbr_loan.accu_pkt_sent,
+            cwnd_loan_overall_rate
+            );
+        bbr->bbr_loan.pkt_sent = 0;
+    }
     /* We don't need to clean up BW sampler */
 }
 
@@ -1068,6 +1124,72 @@ static void
 lsquic_bbr_timeout (void *cong_ctl) {   /* Noop */   }
 
 
+void
+lsquic_bbr_launch_cwnd_loan (void *cong_ctl, unsigned in_flight)
+{
+    struct lsquic_bbr *const bbr = cong_ctl;
+    const struct lsquic_engine_settings *settings =
+        &bbr->bbr_conn_pub->enpub->enp_settings;
+    struct bandwidth bw = BW(minmax_get(&bbr->bbr_max_bandwidth));
+
+    if (bbr->bbr_loan.mode == BBR_NOT_IN_LOAN)
+    {
+        LSQ_DEBUG("bbr checks CWnd loan parameters. CWnd gain:%.2f, pacing gain:%.2f",
+            settings->es_cwnd_loan_cwnd_gain,
+            settings->es_cwnd_loan_pacing_gain);
+
+        bbr->bbr_loan.borrowed_cwnd = in_flight * settings->es_cwnd_loan_cwnd_gain;
+
+        if (BW_TO_BYTES_PER_SEC(&bw) == 0)
+        {
+            bbr->bbr_loan.loan_pacing_rate = lsquic_bbr_pacing_rate(cong_ctl, 0) *
+                settings->es_cwnd_loan_pacing_gain;
+        }
+        else
+        {
+            bbr->bbr_loan.loan_pacing_rate = BW_TO_BYTES_PER_SEC(&bw) *
+                settings->es_cwnd_loan_pacing_gain;
+        }
+
+        if (bbr->bbr_loan.loan_pacing_rate == 0 || bbr->bbr_loan.borrowed_cwnd == 0)
+        {
+            bbr->bbr_loan.loan_abnormal_times++;
+            LSQ_DEBUG("bbr failed to launch CWnd loan, abnormal times:%"PRIu64,
+                bbr->bbr_loan.loan_abnormal_times);
+        }
+        else
+        {
+            bbr->bbr_loan.launch_time = lsquic_time_now();
+            bbr->bbr_loan.loan_times++;
+            bbr->bbr_loan.base_cwnd = in_flight;
+            bbr->bbr_loan.mode = BBR_IN_LOAN;
+            LSQ_DEBUG("bbr launches CWnd loan scheme at %"PRIu64", loan_times:%"PRIu64
+                ", base_cwnd(Byte):%"PRIu64", borrowed_cwnd(Byte):%"PRIu64
+                ", bbr_pacing(Byte/s):%"PRIu64", loan_pacing(Byte/s):%"PRIu64,
+                bbr->bbr_loan.launch_time,
+                bbr->bbr_loan.loan_times,
+                bbr->bbr_loan.base_cwnd,
+                bbr->bbr_loan.borrowed_cwnd,
+                bbr->bbr_pacing_rate.value / 8,
+                bbr->bbr_loan.loan_pacing_rate
+                );
+        }
+    }
+    else
+    {
+        LSQ_DEBUG("bbr has launched CWnd loan scheme at %" PRIu64, bbr->bbr_loan.launch_time);        
+    }
+}
+
+
+int
+lsquic_bbr_get_cwnd_loan_status (void *cong_ctl)
+{
+    struct lsquic_bbr *const bbr = cong_ctl;
+    return bbr->bbr_loan.mode;
+}
+
+
 const struct cong_ctl_if lsquic_cong_bbr_if =
 {
     .cci_ack           = lsquic_bbr_ack,
@@ -1083,4 +1205,6 @@ const struct cong_ctl_if lsquic_cong_bbr_if =
     .cci_timeout       = lsquic_bbr_timeout,
     .cci_sent          = lsquic_bbr_sent,
     .cci_was_quiet     = lsquic_bbr_was_quiet,
+    .cci_launch_cwnd_loan = lsquic_bbr_launch_cwnd_loan,
+    .cci_get_cwnd_loan_status = lsquic_bbr_get_cwnd_loan_status,
 };
