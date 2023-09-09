@@ -76,6 +76,7 @@
                 lsquic_packet_out_total_sz(ctl->sc_conn_pub->lconn, p)
 #define packet_out_sent_sz(p) \
                 lsquic_packet_out_sent_sz(ctl->sc_conn_pub->lconn, p)
+#define SC_PACK_SIZE(ctl_) (+(ctl_)->sc_conn_pub->path->np_pack_size)
 
 enum retx_mode {
     RETX_MODE_HANDSHAKE,
@@ -288,6 +289,21 @@ retx_alarm_rings (enum alarm_id al_id, void *ctx, lsquic_time_t expiry, lsquic_t
         break;
     case RETX_MODE_TLP:
         ++ctl->sc_n_tlp;
+
+        LSQ_DEBUG("Check loan. cwnd:%"PRIu64" inflight:%u cond1:%u, cond2:%p cond3:%u",
+            ctl->sc_ci->cci_get_cwnd(CGP(ctl)), send_ctl_all_bytes_out(ctl),
+            ctl->sc_enpub->enp_settings.es_enable_cwnd_loan,
+            ctl->sc_ci->cci_launch_cwnd_loan,
+            send_ctl_all_bytes_out(ctl)
+            >= ctl->sc_ci->cci_get_cwnd(CGP(ctl)));
+        if (ctl->sc_enpub->enp_settings.es_enable_cwnd_loan
+            && ctl->sc_ci->cci_launch_cwnd_loan
+            && send_ctl_all_bytes_out(ctl)
+            >= ctl->sc_ci->cci_get_cwnd(CGP(ctl)))
+        {
+            ctl->sc_ci->cci_launch_cwnd_loan(CGP(ctl), send_ctl_all_bytes_out(ctl));
+        }
+
         send_ctl_expire(ctl, pns, EXFI_LAST);
         break;
     case RETX_MODE_RTO:
@@ -531,8 +547,6 @@ set_retx_alarm (struct lsquic_send_ctl *ctl, enum packnum_space pns,
 }
 
 
-#define SC_PACK_SIZE(ctl_) (+(ctl_)->sc_conn_pub->path->np_pack_size)
-
 /* XXX can we optimize this by caching the value of this function?  It should
  * not change within one tick.
  */
@@ -737,6 +751,12 @@ lsquic_send_ctl_sent_packet (lsquic_send_ctl_t *ctl,
     LSQ_DEBUG("packet %"PRIu64" has been sent (frame types: %s)",
         packet_out->po_packno, lsquic_frame_types_to_str(frames,
             sizeof(frames), packet_out->po_frame_types));
+
+    LSQ_DEBUG("Check send: cwnd:%"PRIu64", inflight:%u, mtu:%u",  
+        ctl->sc_ci->cci_get_cwnd(CGP(ctl)),
+        ctl->sc_bytes_unacked_all,
+        SC_PACK_SIZE(ctl));
+
     lsquic_senhist_add(&ctl->sc_senhist, packet_out->po_packno);
     if (ctl->sc_ci->cci_sent)
         ctl->sc_ci->cci_sent(CGP(ctl), packet_out, ctl->sc_bytes_unacked_all,

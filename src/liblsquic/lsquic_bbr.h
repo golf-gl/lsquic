@@ -203,6 +203,35 @@ struct lsquic_bbr
         uint64_t            in_flight;
         int                 has_losses;
     }                           bbr_ack_state;
+
+    struct
+    {
+        enum
+        {
+            BBR_NOT_IN_LOAN,
+            BBR_IN_LOAN,
+        }                   mode;
+        // CWnd loan launch timestamp
+        lsquic_time_t       launch_time;
+        // Capture the base CWnd when CWnd loan launches
+        uint64_t            base_cwnd;
+        // Pacing rate during CWnd loan
+        uint64_t            loan_pacing_rate;  /* Bytes per second */
+        // The count of RTT since CWnd loan triggers
+        //uint64_t            rtt_count;
+        // The total borrowed Cwnd, i.e., the additional amount of data can be sent
+        uint64_t            borrowed_cwnd;
+        // Total pkt sent for current CWnd loan event
+        uint64_t            pkt_sent;
+        // Accumulated pkt sent for all CWnd loan event
+        uint64_t            accu_pkt_sent;
+        // Timestamp of last transmission during CWnd loan
+        lsquic_time_t       last_sent_ts;
+        // Total CWnd loan events
+        uint64_t            loan_times;
+        // Total CWnd loan abnormal events
+        uint64_t            loan_abnormal_times;
+    }                           bbr_loan; 
 };
 
 extern const struct cong_ctl_if lsquic_cong_bbr_if;

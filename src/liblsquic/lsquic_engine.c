@@ -394,6 +394,9 @@ lsquic_engine_init_settings (struct lsquic_engine_settings *settings,
     settings->es_ptpc_err_divisor= LSQUIC_DF_PTPC_ERR_DIVISOR;
     settings->es_delay_onclose   = LSQUIC_DF_DELAY_ONCLOSE;
     settings->es_check_tp_sanity = LSQUIC_DF_CHECK_TP_SANITY;
+    settings->es_enable_cwnd_loan = LSQUIC_DF_ENABLE_CWND_LOAN;
+    settings->es_cwnd_loan_cwnd_gain = LSQUIC_DF_CWND_LOAN_CWND_GAIN;
+    settings->es_cwnd_loan_pacing_gain = LSQUIC_DF_CWND_LOAN_PACING_GAIN;
 }
 
 
